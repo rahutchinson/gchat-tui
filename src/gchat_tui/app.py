@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import zlib
 from datetime import date, timedelta
 
@@ -128,6 +129,8 @@ class GChatApp(App):
         self._msgs: list[Message] = []
         self._nick_width = 8
         self._polling = False
+        self._next_recover = 0.0
+        self._recover_backoff = 15
         self._state = "starting browser…"
         # terminal tab title: "(N) Google Chat", flashing while unfocused with new messages
         self._term_focused = True
@@ -171,10 +174,14 @@ class GChatApp(App):
             left.append(f"  ● {n} unread", style="bold")
         right = Text("^q quit  esc chats  ^r refresh  pgup/pgdn scroll")
         self.query_one("#status-left", Static).update(left)
+        self.query_one("#sidebar").border_subtitle = f"{n} unread" if n else ""
         self.query_one("#status-right", Static).update(right)
 
     # ---- terminal tab title ----------------------------------------------------
     def _write_title(self, title: str) -> None:
+        # Names come from other users; drop control chars (ESC, BEL, C1...) so a chat name
+        # can't inject terminal escape sequences.
+        title = "".join(ch for ch in title if ch.isprintable())[:80]
         if title != self._last_title and self._driver is not None:
             self._driver.write(f"\x1b]0;{title}\x07")  # OSC 0: set tab/window title
             self._last_title = title
@@ -241,7 +248,7 @@ class GChatApp(App):
         changed = []
         for c in fresh:
             old = self.convs.get(c.key)
-            if old is not None and c.sort_ts > old.sort_ts:
+            if (old is None and self.convs and c.unread) or (old is not None and c.sort_ts > old.sort_ts):
                 changed.append(c)
         if self.current and self.current.key in {c.key for c in fresh}:
             # keep our local read marker for the open conversation
@@ -267,11 +274,25 @@ class GChatApp(App):
         await lv.clear()
         await lv.extend(ConvItem(c, self.client.display_name(c)) for c in convs)
         lv.index = next((n for n, c in enumerate(convs) if c.key == hl), 0)
-        n_unread = sum(c.unread for c in convs)
-        self.query_one("#sidebar").border_subtitle = f"{n_unread} unread" if n_unread else ""
+
+    async def _recover(self) -> None:
+        now = time.monotonic()
+        if now < self._next_recover:
+            return
+        self.update_status("session expired, reconnecting…")
+        try:
+            await self.session.recover()
+        except Exception as e:  # noqa: BLE001 - never let recovery kill the app
+            log.warning("recover failed: %s", e)
+            self._recover_backoff = min(self._recover_backoff * 2, 600)
+            self._next_recover = now + self._recover_backoff
+            self.update_status(f"signed out; retrying in {self._recover_backoff}s (see log)")
+        else:
+            self._recover_backoff = 15
+            self.update_status("connected")
 
     async def poll(self) -> None:
-        if self._polling or self.client is None:
+        if self._polling or self.client is None or time.monotonic() < self._next_recover:
             return
         self._polling = True
         try:
@@ -286,11 +307,11 @@ class GChatApp(App):
                         self.alert(msgs[-1].creator_name or self.client.display_name(c))
                 elif c.unread:
                     name = self.client.display_name(c)
-                    self.notify(f"new message in {name}", timeout=6)
+                    self.notify(f"new message in {name}", timeout=6, markup=False)
                     self.alert(name)
-        except AuthError:
-            self.update_status("session expired, reconnecting…")
-            await self.session.recover()
+        except AuthError as e:
+            log.warning("auth error during poll: %s", e)
+            await self._recover()
         except Exception as e:  # noqa: BLE001
             log.warning("poll failed: %s", e)
             self.update_status(f"⚠ {type(e).__name__}, retrying")
@@ -329,7 +350,7 @@ class GChatApp(App):
             msgs = await self.client.list_messages(conv)
         except Exception as e:  # noqa: BLE001
             log.exception("list_messages failed")
-            self.notify(f"couldn't load messages: {e}", severity="error")
+            self.notify(f"couldn't load messages: {e}", severity="error", markup=False)
             return []
         if self.current is None or conv.key != self.current.key:
             return msgs  # user switched away while loading
@@ -436,7 +457,7 @@ class GChatApp(App):
             await self.client.send(conv, text)
         except Exception as e:  # noqa: BLE001
             log.exception("send failed")
-            self.notify(f"send failed: {e}", severity="error", timeout=10)
+            self.notify(f"send failed: {e}", severity="error", timeout=10, markup=False)
             inp = self.query_one("#compose", Input)
             if not inp.value:
                 inp.value = text

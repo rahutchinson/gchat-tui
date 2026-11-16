@@ -7,7 +7,7 @@ import logging
 import sys
 
 from .cookies import BROWSERS, find_sources
-from .session import DATA_DIR, Session
+from .session import DATA_DIR, Session, ensure_private_dir
 
 
 def main() -> None:
@@ -31,7 +31,7 @@ def main() -> None:
             print(f"{'*' if n == 0 else ' '} {s}  (last used Google {_ago(s.last_used)})")
         sys.exit(0 if sources else 1)
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(DATA_DIR)
     # One instance at a time: the browser profile can't be shared.
     lock = open(DATA_DIR / "lock", "w")  # noqa: SIM115 - held for the process lifetime
     try:

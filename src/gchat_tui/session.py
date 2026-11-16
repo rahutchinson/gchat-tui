@@ -30,6 +30,12 @@ class AuthError(RuntimeError):
     pass
 
 
+def ensure_private_dir(path: Path) -> None:
+    """Create path owner-only (0700). It holds a live Google session; fix older installs too."""
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
 class Session:
     def __init__(self, headless: bool = True, cookie_browser: str = "auto"):
         self.headless = headless
@@ -44,7 +50,8 @@ class Session:
 
     # ---- lifecycle -------------------------------------------------------
     async def start(self) -> None:
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(DATA_DIR)
+        ensure_private_dir(PROFILE_DIR)
         self._pw = await async_playwright().start()
         try:
             self.ctx = await self._pw.firefox.launch_persistent_context(
@@ -77,7 +84,7 @@ class Session:
         return self.page.url.startswith("https://chat.google.com/")
 
     async def recover(self) -> None:
-        """Reload the page; if Google logged us out, re-import cookies from Firefox."""
+        """Reload the page; if Google logged us out, re-import cookies from the browser."""
         self.request_header = None
         if not await self._load():
             await self._import_cookies()
@@ -123,18 +130,19 @@ class Session:
         res = await self.page.evaluate(
             """async ([url, headers, body]) => {
                 const r = await fetch(url, {method: 'POST', headers, body, credentials: 'include'});
-                return [r.status, await r.text()];
+                return [r.status, r.url, await r.text()];
             }""",
             [f"{API}{method}", headers, json.dumps(body)],
         )
-        status, text = res
+        status, final_url, text = res
         if status in (401, 403):
             raise AuthError(f"{method}: HTTP {status}")
         if status != 200:
             raise RuntimeError(f"{method}: HTTP {status}: {text[:300]}")
-        if text.startswith(")]}'"):
-            text = text[4:]
-        data = json.loads(text)
+        if not final_url.startswith(API) or not text.startswith(")]}'"):
+            # Redirected to a sign-in page, or got HTML instead of an API response.
+            raise AuthError(f"{method}: not an API response (signed out?)")
+        data = json.loads(text[4:])
         # Envelope: [["dfe.xxx", field1, field2, ...]]. Drop the tag so field N is at N-1,
         # same as every other (untagged) message.
         return data[0][1:]

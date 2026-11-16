@@ -25,6 +25,17 @@ def f(msg, n: int, default=None):
     return default
 
 
+# C0 controls except \t and \n, DEL, and C1 controls. Chat text comes from other people
+# and is drawn in your terminal; ESC/CSI/OSC sequences in it could retitle the terminal,
+# write the clipboard (OSC 52), etc. Rich/Textual only strip a few of these.
+_UNSAFE = {c: None for c in [*range(0x00, 0x09), *range(0x0B, 0x20), 0x7F, *range(0x80, 0xA0)]}
+
+
+def clean(s) -> str:
+    """Make a remote string safe to display in a terminal."""
+    return s.translate(_UNSAFE) if isinstance(s, str) else ""
+
+
 def i64(v) -> int:
     """int64s arrive as JSON strings or numbers."""
     return int(v) if v not in (None, "") else 0
@@ -95,7 +106,7 @@ def _parse_world_item(it) -> Conversation | None:
     return Conversation(
         key=key,
         gid=gid,
-        name=f(it, 5),  # room_name
+        name=clean(f(it, 5)) or None,  # room_name
         member_ids=[m for m in members if m],
         sort_ts=i64(f(it, 3)),  # sort_timestamp
         last_read=i64(f(rs, 2)),  # GroupReadState.last_read_time
@@ -119,9 +130,9 @@ def _attachment_labels(m) -> list[str]:
             elif ctype.startswith("video/"):
                 labels.append("video")
             else:
-                labels.append(f"file: {f(up, 3, 'attachment')}")
+                labels.append(f"file: {clean(f(up, 3, 'attachment'))}")
         elif kind in DRIVE_TYPES:
-            labels.append(f"drive: {f(f(a, 4), 2, 'file')}")  # drive_metadata.title
+            labels.append(f"drive: {clean(f(f(a, 4), 2, 'file'))}")  # drive_metadata.title
         elif kind == 9:
             labels.append("image")
         elif kind == 7:
@@ -139,9 +150,9 @@ def _parse_message(m, is_reply: bool) -> Message:
         id=f(mid, 2, ""),
         topic_id=topic or "",
         creator_id=f(f(creator, 1), 1, ""),
-        creator_name=f(creator, 2, ""),
+        creator_name=clean(f(creator, 2, "")),
         time_us=i64(f(m, 3)),  # create_time
-        text=f(m, 10, ""),  # text_body
+        text=clean(f(m, 10, "")),  # text_body
         is_reply=is_reply,
         attachments=_attachment_labels(m),
     )
@@ -180,8 +191,8 @@ class ChatClient:
             user = f(member, 1)
             uid = f(f(user, 1), 1)
             if uid:
-                self.names[uid] = f(user, 2) or uid
-                self.first_names[uid] = f(user, 5) or self.names[uid]
+                self.names[uid] = clean(f(user, 2)) or uid
+                self.first_names[uid] = clean(f(user, 5)) or self.names[uid]
 
     def display_name(self, c: Conversation) -> str:
         if c.name:

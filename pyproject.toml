@@ -3,6 +3,7 @@ name = "gchat-tui"
 version = "0.1.0"
 description = "Terminal client for Google Chat that works with personal Gmail accounts"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "Ryan Hutchinson", email = "9100245+rahutchinson@users.noreply.github.com" }
 ]
