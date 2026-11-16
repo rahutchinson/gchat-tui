@@ -31,8 +31,9 @@ class AuthError(RuntimeError):
 
 
 class Session:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, cookie_browser: str = "auto"):
         self.headless = headless
+        self.cookie_browser = cookie_browser  # where to import a Google login from
         self._pw = None
         self.ctx: BrowserContext | None = None
         self.page: Page | None = None
@@ -58,12 +59,12 @@ class Session:
         self.page = self.ctx.pages[0] if self.ctx.pages else await self.ctx.new_page()
         self.page.on("request", self._sniff)
         if not await self._load():
-            log.info("Not logged in; importing cookies from Firefox")
-            await self.ctx.add_cookies(load_google_cookies())
+            log.info("Not logged in; importing cookies (%s)", self.cookie_browser)
+            await self._import_cookies()
             if not await self._load():
                 raise AuthError(
-                    "Could not log in to Google Chat. Sign in to chat.google.com in "
-                    "Firefox, then restart gchat-tui."
+                    "Could not log in to Google Chat. Sign in to chat.google.com in your "
+                    "browser (or pick one with --browser), then restart gchat-tui."
                 )
         try:
             await asyncio.wait_for(self._ready.wait(), 30)
@@ -79,10 +80,17 @@ class Session:
         """Reload the page; if Google logged us out, re-import cookies from Firefox."""
         self.request_header = None
         if not await self._load():
-            await self.ctx.add_cookies(load_google_cookies())
+            await self._import_cookies()
             if not await self._load():
-                raise AuthError("Logged out and Firefox cookies didn't work")
+                raise AuthError("Logged out, and re-importing browser cookies didn't work")
         await asyncio.wait_for(self._ready.wait(), 30)
+
+    async def _import_cookies(self) -> None:
+        try:
+            cookies = load_google_cookies(self.cookie_browser)
+        except (OSError, RuntimeError) as e:
+            raise AuthError(str(e)) from e
+        await self.ctx.add_cookies(cookies)
 
     async def close(self) -> None:
         if self.ctx:

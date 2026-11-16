@@ -6,6 +6,7 @@ import fcntl
 import logging
 import sys
 
+from .cookies import BROWSERS, find_sources
 from .session import DATA_DIR, Session
 
 
@@ -13,7 +14,22 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="gchat-tui")
     p.add_argument("--show-browser", action="store_true", help="run the browser visibly (debugging)")
     p.add_argument("--check", action="store_true", help="connect, list conversations, exit 0/1 (health check)")
+    p.add_argument(
+        "--browser",
+        choices=["auto", *BROWSERS],
+        default="auto",
+        help="browser to import your Google login from (default: the one that used Google most recently)",
+    )
+    p.add_argument("--list-browsers", action="store_true", help="show browsers with a Google login and exit")
     args = p.parse_args()
+
+    if args.list_browsers:
+        sources = find_sources(args.browser)
+        if not sources:
+            print("No browser with a Google login found.")
+        for n, s in enumerate(sources):
+            print(f"{'*' if n == 0 else ' '} {s}  (last used Google {_ago(s.last_used)})")
+        sys.exit(0 if sources else 1)
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     # One instance at a time: the browser profile can't be shared.
@@ -28,7 +44,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
-    session = Session(headless=not args.show_browser)
+    session = Session(headless=not args.show_browser, cookie_browser=args.browser)
 
     if args.check:
         sys.exit(asyncio.run(_check(session)))
@@ -59,3 +75,14 @@ async def _check(session: Session) -> int:
         return 1
     finally:
         await session.close()
+
+
+def _ago(ts: float) -> str:
+    import time
+
+    mins = int((time.time() - ts) / 60)
+    if mins < 60:
+        return f"{mins}m ago"
+    if mins < 60 * 48:
+        return f"{mins // 60}h ago"
+    return f"{mins // 1440}d ago"
