@@ -77,6 +77,9 @@ class Message:
     text: str
     is_reply: bool = False  # a thread reply (not the topic's first message)
     attachments: list[str] = field(default_factory=list)  # labels like "image"
+    raw_id: list | None = None  # pblite MessageId, passed back to the API as-is
+    # emoji -> (count, did I react)
+    reactions: dict[str, tuple[int, bool]] = field(default_factory=dict)
 
     @property
     def time(self) -> datetime:
@@ -155,7 +158,18 @@ def _parse_message(m, is_reply: bool) -> Message:
         text=clean(f(m, 10, "")),  # text_body
         is_reply=is_reply,
         attachments=_attachment_labels(m),
+        raw_id=mid,
+        reactions=_parse_reactions(f(m, 21, [])),
     )
+
+
+def _parse_reactions(rs) -> dict[str, tuple[int, bool]]:
+    out = {}
+    for r in rs:  # Reaction{1 emoji{1 unicode}, 2 count, 3 current_user_participated}
+        emoji = clean(f(f(r, 1), 1, ""))
+        if emoji:
+            out[emoji] = (int(f(r, 2, 0)), bool(f(r, 3)))
+    return out
 
 
 # ---- client -------------------------------------------------------------------
@@ -224,6 +238,24 @@ class ChatClient:
         # CreateTopicRequest: 2 text_body, 4 local_id, 5 group_id, 8 history_v2
         body = self.s.req({2: text, 4: local_id, 5: c.gid, 8: True})
         await self.s.call("create_topic", body, space_id=c.raw_id)
+
+    async def react(self, c: Conversation, m: Message, emoji: str, add: bool) -> None:
+        # UpdateReactionRequest: 1 message_id, 2 emoji{1 unicode}, 3 option (1 ADD, 2 REMOVE)
+        body = self.s.req({1: m.raw_id, 2: [emoji], 3: 1 if add else 2})
+        await self.s.call("update_reaction", body, space_id=c.raw_id)
+
+    async def reply(self, c: Conversation, m: Message, text: str) -> None:
+        """Reply in the message's thread."""
+        local_id = "gct-" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+        # CreateMessageRequest: 1 parent_id (MessageParentId{4 topic_id}), 2 text_body, 4 local_id
+        parent = f(m.raw_id, 1)
+        body = self.s.req({1: parent, 2: text, 4: local_id})
+        await self.s.call("create_message", body, space_id=c.raw_id)
+
+    async def set_typing(self, c: Conversation, typing: bool) -> None:
+        # SetTypingStateRequest: 1 state (1 TYPING, 2 STOPPED), 2 context{1 group_id}
+        body = self.s.req({1: 1 if typing else 2, 2: [c.gid]})
+        await self.s.call("set_typing_state", body, space_id=c.raw_id)
 
     async def mark_read(self, c: Conversation) -> None:
         # MarkGroupReadstateRequest: 1 group_id, 2 last_read_time

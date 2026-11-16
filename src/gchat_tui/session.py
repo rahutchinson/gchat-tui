@@ -30,6 +30,44 @@ class AuthError(RuntimeError):
     pass
 
 
+# Runs in the page before Chat's own scripts. Chat receives live events (new messages,
+# reactions, typing) over long-lived XHRs to its WebChannel endpoint, framed as
+# "<length>\n<json>". We split each response into whole frames and tee them to Python;
+# we never modify them.
+STREAM_TAP_JS = r"""
+(() => {
+  const RE = /^https:\/\/chat\.google\.com\/.*\/multi-watch\/channel/;
+  const open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    try {
+      const u = String(url);
+      if (RE.test(u)) {
+        let seen = 0, buf = "";
+        const flush = () => {
+          const t = this.responseText || "";
+          if (t.length <= seen) return;
+          buf += t.slice(seen);
+          seen = t.length;
+          for (;;) {
+            const m = /^(\d+)\n/.exec(buf);
+            if (!m) { if (buf.length && !/^\d*$/.test(buf)) buf = ""; break; }
+            const n = parseInt(m[1], 10), start = m[0].length;
+            if (buf.length < start + n) break;
+            const frame = buf.substr(start, n);
+            buf = buf.slice(start + n);
+            try { window.__gchatTap(u, frame); } catch (e) {}
+          }
+        };
+        this.addEventListener("progress", flush);
+        this.addEventListener("load", flush);
+      }
+    } catch (e) {}
+    return open.call(this, method, url, ...rest);
+  };
+})();
+"""
+
+
 def ensure_private_dir(path: Path) -> None:
     """Create path owner-only (0700). It holds a live Google session; fix older installs too."""
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -47,6 +85,8 @@ class Session:
         # RequestHeader exactly as the web client sends it (field 100 of most requests)
         self.request_header: list | None = None
         self._ready = asyncio.Event()
+        # callbacks(url, chunk) for raw live-event stream data
+        self.stream_listeners: list = []
 
     # ---- lifecycle -------------------------------------------------------
     async def start(self) -> None:
@@ -63,6 +103,8 @@ class Session:
                     "gchat-tui is already running (the browser profile is in use). Quit the other one first."
                 ) from None
             raise
+        await self.ctx.expose_function("__gchatTap", self._on_stream_chunk)
+        await self.ctx.add_init_script(STREAM_TAP_JS)
         self.page = self.ctx.pages[0] if self.ctx.pages else await self.ctx.new_page()
         self.page.on("request", self._sniff)
         if not await self._load():
@@ -104,6 +146,13 @@ class Session:
             await self.ctx.close()
         if self._pw:
             await self._pw.stop()
+
+    def _on_stream_chunk(self, url: str, chunk: str) -> None:
+        for cb in self.stream_listeners:
+            try:
+                cb(url, chunk)
+            except Exception:  # noqa: BLE001 - a bad listener must not break the page
+                log.exception("stream listener failed")
 
     def _sniff(self, req: Request) -> None:
         if not req.url.startswith(API) or req.method != "POST":

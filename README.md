@@ -10,6 +10,9 @@ A terminal client for Google Chat that works with **personal @gmail accounts**.
 ## Features
 
 - DMs, group chats and spaces: list, read, send, mark as read
+- Live updates: new messages, reactions and "… is typing" arrive instantly
+- Select a message to reply in its thread, or react with 👍 or ❤️
+- Shows when others are typing, and tells them when you are
 - irssi-style layout that uses your terminal's own color palette
 - New messages show in the terminal tab title (`(3) Google Chat`), which flashes
   while the terminal is in the background
@@ -38,8 +41,19 @@ Thread replies in spaces show inline (marked `↳`), not as separate threads.
     uv run gchat-tui --browser chrome # import the login from a specific browser
     uv run gchat-tui --show-browser   # visible browser, for debugging
 
-Keys: ↑/↓ + Enter open a conversation, type + Enter to send, Esc returns to the
-list, PgUp/PgDn scroll, Ctrl+R refresh, Ctrl+Q quit.
+Keys:
+
+| Where | Key | Does |
+|---|---|---|
+| chat list | ↑/↓, Enter | pick and open a conversation |
+| compose | Enter | send |
+| compose (empty) | ↑ | select the latest message |
+| selected message | ↑/↓ or k/j | move between messages |
+| selected message | r or Enter | reply in that message's thread |
+| selected message | t / h | toggle 👍 / ❤️ |
+| selected message | Esc | back to typing |
+| compose | Esc | cancel a reply, or back to the chat list |
+| anywhere | PgUp/PgDn, Ctrl+R, Ctrl+Q | scroll, refresh, quit |
 
 ## How it works
 
@@ -57,9 +71,13 @@ inside the page.
 - **Data:** responses are protobuf in Google's "pblite" JSON form, read by
   protobuf field number. Field numbers come from
   [purple-googlechat](https://github.com/EionRobb/purple-googlechat)'s
-  `googlechat.proto`. All format knowledge is in `src/gchat_tui/api.py`.
-- **Updates:** the conversation list is polled every 4 seconds; the open
-  conversation reloads when it changes.
+  `googlechat.proto`. Request/response format knowledge is in `src/gchat_tui/api.py`.
+- **Live updates:** the web app's own event stream (a WebChannel) is teed out of
+  the page; events are base64 protobuf and are decoded by field number in
+  `src/gchat_tui/stream.py`. An event about a conversation triggers a re-fetch
+  through the normal API, so little of the event format is relied on. Polling
+  remains as a fallback: every 30 s while the stream works, every 4 s if it
+  goes quiet.
 
 ## Your data
 
